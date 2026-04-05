@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=75.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cockroachdb-watsonx-data-pipeline"
+version = "0.1.0"
+description = "CDC pipeline: CockroachDB (OLTP) to IBM watsonx.data (Iceberg Lakehouse)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Virag Tripathi"}
+]
+
+dependencies = [
+    "click>=8.0.0",
+    "flask>=3.0.0",
+    "pyarrow>=14.0.0",
+    "ibm-cos-sdk>=2.13.0",
+    "requests>=2.32.0",
+    "pyiceberg[pyarrow,s3fs]>=0.11.1",
+]
+
+[project.optional-dependencies]
+kafka = [
+    "confluent-kafka>=2.3.0",
+]
+watsonx = [
+    # ibm-watsonxdata SDK has build issues on some platforms.
+    # Use the Iceberg REST Catalog API directly instead (via requests).
+]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.3.0",
+]
+all = [
+    "confluent-kafka>=2.3.0",
+]
+
+[project.scripts]
+crdb-wxd-pipeline = "pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]

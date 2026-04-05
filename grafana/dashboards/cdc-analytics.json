@@ -1,0 +1,272 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total CDC Events",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/totals",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "total_events", "text": "Total Events", "type": "number" }
+        ]
+      }],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Total Spend",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/totals",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "total_spend", "text": "Total Spend", "type": "number" }
+        ]
+      }],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Unique Expenses",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/totals",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "unique_expenses", "text": "Unique Expenses", "type": "number" }
+        ]
+      }],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Unique Merchants",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/totals",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "unique_merchants", "text": "Unique Merchants", "type": "number" }
+        ]
+      }],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Spending by Category",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/spending-by-category",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "category", "text": "Category", "type": "string" },
+          { "selector": "total", "text": "Total Spend", "type": "number" }
+        ]
+      }],
+      "options": {
+        "reduceOptions": { "values": true, "calcs": [], "fields": "/^Total Spend$/" },
+        "pieType": "donut",
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 6,
+      "title": "CDC Operations",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/cdc-operations",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "operation", "text": "Operation", "type": "string" },
+          { "selector": "event_count", "text": "Count", "type": "number" }
+        ]
+      }],
+      "options": {
+        "reduceOptions": { "values": true, "calcs": [], "fields": "/^Count$/" },
+        "pieType": "donut",
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Top Merchants by Spend",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/top-merchants",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "merchant", "text": "Merchant", "type": "string" },
+          { "selector": "total", "text": "Total Spend", "type": "number" }
+        ]
+      }],
+      "options": {
+        "reduceOptions": { "values": true, "calcs": [], "fields": "/^Total Spend$/" },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "namePlacement": "auto",
+        "valueMode": "text"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": { "mode": "continuous-blues" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Recent CDC Events",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "cdc-pipeline" },
+      "targets": [{
+        "refId": "A",
+        "type": "json",
+        "source": "url",
+        "parser": "backend",
+        "url": "http://host.docker.internal:5002/cdc/dashboard/recent-events",
+        "url_options": { "method": "GET" },
+        "format": "table",
+        "root_selector": "",
+        "columns": [
+          { "selector": "expense_id", "text": "Expense ID", "type": "string" },
+          { "selector": "merchant", "text": "Merchant", "type": "string" },
+          { "selector": "expense_amount", "text": "Amount", "type": "number" },
+          { "selector": "shopping_type", "text": "Category", "type": "string" },
+          { "selector": "cdc_operation", "text": "CDC Op", "type": "string" },
+          { "selector": "cdc_timestamp", "text": "Timestamp", "type": "string" }
+        ]
+      }],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Amount" },
+            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+          }
+        ]
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["cockroachdb", "cdc", "iceberg", "watsonx"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "CockroachDB CDC Analytics",
+  "uid": "crdb-cdc",
+  "version": 1
+}

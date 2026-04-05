@@ -1,0 +1,169 @@
+services:
+
+  # CockroachDB -- OLTP source
+  cockroachdb:
+    image: cockroachdb/cockroach:${COCKROACHDB_VERSION:-v25.4.6}
+    container_name: crdb-source
+    hostname: cockroachdb
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+    volumes:
+      - cockroach-data:/cockroach/cockroach-data
+      - ./sql/setup.sql:/docker-entrypoint-initdb.d/setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "cockroach sql --insecure --execute 'SELECT 1'"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+    networks:
+      - pipeline
+
+  # Pipeline: Webhook CDC receiver -> Parquet -> COS/local
+  pipeline-webhook:
+    build: .
+    container_name: crdb-pipeline-webhook
+    ports:
+      - "5002:5002"
+    environment:
+      - CDC_MODE=webhook
+      - CDC_WEBHOOK_PORT=5002
+      - CDC_BATCH_SIZE=${CDC_BATCH_SIZE:-100}
+      - CDC_BATCH_TIMEOUT_SECONDS=${CDC_BATCH_TIMEOUT_SECONDS:-30}
+      # IBM COS (optional, falls back to local filesystem)
+      - COS_ENDPOINT=${COS_ENDPOINT:-}
+      - COS_API_KEY=${COS_API_KEY:-}
+      - COS_INSTANCE_ID=${COS_INSTANCE_ID:-}
+      - COS_BUCKET=${COS_BUCKET:-crdb-lakehouse}
+      # watsonx.data / Presto (optional, for Iceberg table insert)
+      - PRESTO_ENGINE_HOST=${PRESTO_ENGINE_HOST:-}
+      - WATSONX_DATA_API_KEY=${WATSONX_DATA_API_KEY:-}
+      - WATSONX_DATA_CATALOG=${WATSONX_DATA_CATALOG:-iceberg_data}
+      - WATSONX_DATA_NAMESPACE=${WATSONX_DATA_NAMESPACE:-banko}
+    volumes:
+      - cdc-output:/app/cdc-output
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    networks:
+      - pipeline
+
+  # --- Kafka / Debezium path (optional, use profile) ---
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:${CONFLUENT_VERSION:-7.4.0}
+    container_name: crdb-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    profiles: ["kafka"]
+    networks:
+      - pipeline
+
+  kafka:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION:-7.4.0}
+    container_name: crdb-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:29092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,HOST://0.0.0.0:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+    profiles: ["kafka"]
+    networks:
+      - pipeline
+
+  connect:
+    image: quay.io/debezium/connect:${DEBEZIUM_VERSION:-3.5.0.Final}
+    container_name: crdb-debezium-connect
+    depends_on:
+      - kafka
+      - cockroachdb
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: crdb-connect-cluster
+      CONFIG_STORAGE_TOPIC: crdb-connect-configs
+      OFFSET_STORAGE_TOPIC: crdb-connect-offsets
+      STATUS_STORAGE_TOPIC: crdb-connect-status
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    profiles: ["kafka"]
+    networks:
+      - pipeline
+
+  pipeline-kafka:
+    build: .
+    container_name: crdb-pipeline-kafka
+    command: ["kafka"]
+    environment:
+      - CDC_MODE=kafka
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_CDC_TOPICS=${KAFKA_CDC_TOPICS:-crdb.defaultdb.public.expenses}
+      - KAFKA_GROUP_ID=${KAFKA_GROUP_ID:-crdb-wxd-pipeline}
+      - CDC_BATCH_SIZE=${CDC_BATCH_SIZE:-100}
+      - CDC_BATCH_TIMEOUT_SECONDS=${CDC_BATCH_TIMEOUT_SECONDS:-30}
+      - COS_ENDPOINT=${COS_ENDPOINT:-}
+      - COS_API_KEY=${COS_API_KEY:-}
+      - COS_INSTANCE_ID=${COS_INSTANCE_ID:-}
+      - COS_BUCKET=${COS_BUCKET:-crdb-lakehouse}
+      - PRESTO_ENGINE_HOST=${PRESTO_ENGINE_HOST:-}
+      - WATSONX_DATA_API_KEY=${WATSONX_DATA_API_KEY:-}
+      - WATSONX_DATA_CATALOG=${WATSONX_DATA_CATALOG:-iceberg_data}
+      - WATSONX_DATA_NAMESPACE=${WATSONX_DATA_NAMESPACE:-banko}
+    volumes:
+      - cdc-output:/app/cdc-output
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_healthy
+    profiles: ["kafka"]
+    networks:
+      - pipeline
+
+  # --- Grafana dashboard (optional, use profile) ---
+
+  grafana:
+    image: grafana/grafana-oss:12.0.0
+    container_name: crdb-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    profiles: ["dashboard"]
+    networks:
+      - pipeline
+
+volumes:
+  cockroach-data:
+  cdc-output:
+
+networks:
+  pipeline:
+    driver: bridge

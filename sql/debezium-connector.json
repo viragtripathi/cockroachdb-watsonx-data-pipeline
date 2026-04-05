@@ -1,0 +1,27 @@
+{
+  "name": "crdb-expenses-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.cockroachdb.CockroachDBConnector",
+    "database.hostname": "cockroachdb",
+    "database.port": "26257",
+    "database.user": "root",
+    "database.password": "",
+    "database.dbname": "defaultdb",
+    "database.server.name": "crdb",
+    "topic.prefix": "crdb",
+    "table.include.list": "public.expenses",
+    "cockroachdb.changefeed.envelope": "enriched",
+    "cockroachdb.changefeed.enriched.properties": "source,schema",
+    "cockroachdb.changefeed.include.updated": true,
+    "cockroachdb.changefeed.include.diff": true,
+    "cockroachdb.changefeed.resolved.interval": "10s",
+    "heartbeat.interval.ms": 10000,
+    "snapshot.mode": "initial",
+    "cockroachdb.changefeed.sink.type": "kafka",
+    "cockroachdb.changefeed.sink.uri": "kafka://kafka:9092",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter.schemas.enable": "false"
+  }
+}
