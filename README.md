@@ -221,8 +221,11 @@ Each file contains:
 | `shopping_type`  | string  | Category                         |
 | `payment_method` | string  | Payment method                   |
 | `recurring`      | bool    | Recurring flag                   |
+| `cdc_table`      | string  | Source table name                |
 | `cdc_operation`  | string  | insert, update, delete, snapshot |
 | `cdc_timestamp`  | string  | CDC event timestamp              |
+
+For non-expenses tables (e.g. TPC-C), all columns are stored as strings and the pipeline auto-detects the source table from the CDC event payload.
 
 ## Architecture
 
@@ -248,8 +251,8 @@ Each file contains:
        │             │  - Batches events              │
        │             │  - Writes Snappy Parquet       │
        │             │  - Hive partitioning           │
-       │             └──────┬─────────────┬───────────┘
-       │                    │             │
+       │             └──────┬────────────┬────────────┘
+       │                    │            │
        │       ┌────────────▼──┐  ┌──────▼──────────────┐
        │       │  IBM COS      │  │  Presto REST API    │
        │       │  (Parquet     │  │  INSERT INTO        │
@@ -353,6 +356,7 @@ CREATE TABLE iceberg_data.banko.expenses (
     shopping_type VARCHAR,
     payment_method VARCHAR,
     recurring BOOLEAN,
+    cdc_table VARCHAR,
     cdc_operation VARCHAR,
     cdc_timestamp VARCHAR
 )
@@ -535,8 +539,8 @@ DROP TABLE IF EXISTS iceberg_data.banko.expenses;
 CREATE TABLE iceberg_data.banko.expenses (
     expense_id VARCHAR, user_id VARCHAR, description VARCHAR, merchant VARCHAR,
     expense_amount DOUBLE, expense_date VARCHAR, shopping_type VARCHAR,
-    payment_method VARCHAR, recurring BOOLEAN, cdc_operation VARCHAR,
-    cdc_timestamp VARCHAR
+    payment_method VARCHAR, recurring BOOLEAN, cdc_table VARCHAR,
+    cdc_operation VARCHAR, cdc_timestamp VARCHAR
 ) WITH (format = 'PARQUET', partitioning = ARRAY['shopping_type']);
 
 # 2. Start the pipeline (with all env vars set)
@@ -596,10 +600,24 @@ The pipeline exposes these endpoints when Presto is configured:
 | `GET /cdc/dashboard/recent-events`        | Latest 20 CDC events                           |
 | `GET /cdc/dashboard/snapshots`            | Iceberg table snapshots                        |
 
+### Cleanup (Reset for Fresh Demo)
+
+```bash
+# Automated: cancels changefeeds, resets TPC-C, prints Iceberg SQL
+./scripts/cleanup.sh                             # Clean all
+./scripts/cleanup.sh --workload expenses         # Expenses only
+./scripts/cleanup.sh --workload tpcc             # TPC-C only
+./scripts/cleanup.sh --crdb-url "postgresql://..." # Custom CockroachDB
+
+# Then run the printed SQL in the watsonx.data Query workspace
+# (or use sql/cleanup.sql for expenses, sql/setup-tpcc.sql for TPC-C)
+```
+
 ### Full Demo Workflow (Webhook Path)
 
 ```bash
-# 1. Clean up Iceberg table (watsonx.data Query workspace, or sql/cleanup.sql)
+# 1. Clean up: ./scripts/cleanup.sh --workload expenses
+#    + run sql/cleanup.sql in watsonx.data Query workspace
 # 2. Start pipeline:  uv run crdb-wxd-pipeline webhook
 # 3. Start Grafana:   docker compose --profile dashboard up -d grafana
 # 4. Run demo:        uv run python scripts/demo.py
@@ -610,7 +628,8 @@ The pipeline exposes these endpoints when Presto is configured:
 ### Full Demo Workflow (Kafka + Debezium Path)
 
 ```bash
-# 1. Clean up Iceberg table (watsonx.data Query workspace, or sql/cleanup.sql)
+# 1. Clean up: ./scripts/cleanup.sh --workload expenses
+#    + run sql/cleanup.sql in watsonx.data Query workspace
 # 2. Start everything: docker compose --profile kafka --profile dashboard up -d
 # 3. Wait for Connect: until curl -s http://localhost:8083/ > /dev/null 2>&1; do sleep 2; done
 # 4. Register connector: curl -X POST http://localhost:8083/connectors \
@@ -687,6 +706,69 @@ FROM iceberg_data.banko.expenses_snapshot;
 ```
 
 See `sql/federation-setup.sql` for complete setup instructions and `sql/demo-federation.sql` for a guided walkthrough of all three patterns.
+
+## TPC-C Workload Demo
+
+The pipeline supports any CockroachDB table, not just the Banko expenses schema. The TPC-C demo uses CockroachDB's [built-in TPC-C workload](https://www.cockroachlabs.com/docs/stable/cockroach-workload) to generate realistic OLTP traffic (orders, payments, deliveries, stock updates) and streams all changes to Iceberg.
+
+### Quick Start
+
+```bash
+# 1. Start the CDC pipeline (in one terminal)
+uv run crdb-wxd-pipeline webhook
+
+# 2. Run the automated TPC-C demo (in another terminal)
+./scripts/demo-watsonx.sh --workload tpcc --crdb-url "postgresql://root@localhost:26257/tpcc?sslmode=disable"
+```
+
+The demo script automatically:
+1. Initializes TPC-C with `cockroach workload init tpcc` (1 warehouse, ~600K rows)
+2. Creates a changefeed on 7 high-activity tables (order, order_line, new_order, customer, district, stock, history)
+3. Runs `cockroach workload run tpcc --tolerate-errors` to generate transactions
+4. Shows pipeline stats as CDC events flow to Parquet/Iceberg
+5. Prints analytics queries for the watsonx.data Query workspace
+
+### Options
+
+```bash
+# More warehouses and longer workload
+./scripts/demo-watsonx.sh --workload tpcc --tpcc-warehouses 5 --tpcc-duration 120s
+
+# Run specific act only
+./scripts/demo-watsonx.sh --workload tpcc --act 3    # Just run the workload
+```
+
+### Iceberg Tables
+
+Create the TPC-C Iceberg tables in the watsonx.data Query workspace (also in `sql/setup-tpcc.sql`):
+
+```sql
+CREATE SCHEMA IF NOT EXISTS iceberg_data.tpcc
+WITH (location = 's3a://<your-bucket-name>/tpcc');
+
+-- 9 tables: warehouse, district, customer, order, order_line,
+-- new_order, item, stock, history
+-- See sql/setup-tpcc.sql for full CREATE TABLE statements
+```
+
+### Analytics Queries
+
+See `sql/demo-tpcc.sql` for the full set, including:
+- CDC events by table and operation type
+- Order revenue by district
+- Customer balance change tracking
+- Low stock alerts
+- New order lifecycle (insert -> delete on delivery)
+- OLTP vs OLAP comparison (same query on CockroachDB vs Iceberg)
+- Iceberg time travel on TPC-C data
+
+### Cleanup
+
+```bash
+# Reset everything for a fresh TPC-C demo
+./scripts/cleanup.sh --workload tpcc
+# Then run sql/setup-tpcc.sql in watsonx.data Query workspace
+```
 
 ## Related Projects
 

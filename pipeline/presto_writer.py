@@ -70,16 +70,20 @@ class PrestoWriter:
         print(f"🔑 IAM token acquired (expires in {expires_in}s)")
         return self._token
 
-    def insert_batch(self, rows: list[dict]) -> bool:
+    def insert_batch(self, rows: list[dict], table_name: str = "expenses") -> bool:
         """Insert a batch of CDC rows into the Iceberg table. Returns True on success."""
         if not rows:
             return True
 
-        table = f"{self.catalog}.{self.namespace}.expenses"
-        sql = self._build_insert_sql(table, rows)
-        return self._execute_sql(sql, f"{len(rows)} rows into {table}")
+        iceberg_table = f"{self.catalog}.{self.namespace}.{table_name}"
+        if table_name == "expenses":
+            sql = self._build_expenses_insert(iceberg_table, rows)
+        else:
+            sql = self._build_generic_insert(iceberg_table, rows)
+        return self._execute_sql(sql, f"{len(rows)} rows into {iceberg_table}")
 
-    def _build_insert_sql(self, table: str, rows: list[dict]) -> str:
+    def _build_expenses_insert(self, table: str, rows: list[dict]) -> str:
+        """Build INSERT SQL for the expenses table (legacy, typed)."""
         values = []
         for r in rows:
             recurring = "true" if r.get("recurring") else "false"
@@ -88,14 +92,28 @@ class PrestoWriter:
                 f"'{_esc(r['description'])}', '{_esc(r['merchant'])}', "
                 f"DOUBLE '{r['expense_amount']}', '{_esc(r['expense_date'])}', "
                 f"'{_esc(r['shopping_type'])}', '{_esc(r['payment_method'])}', "
-                f"{recurring}, '{_esc(r['cdc_operation'])}', '{_esc(r['cdc_timestamp'])}')"
+                f"{recurring}, '{_esc(r.get('cdc_table', 'expenses'))}', "
+                f"'{_esc(r['cdc_operation'])}', '{_esc(r['cdc_timestamp'])}')"
             )
         return (
             f"INSERT INTO {table} "
             "(expense_id, user_id, description, merchant, expense_amount, "
             "expense_date, shopping_type, payment_method, recurring, "
-            "cdc_operation, cdc_timestamp) VALUES " + ", ".join(values)
+            "cdc_table, cdc_operation, cdc_timestamp) VALUES " + ", ".join(values)
         )
+
+    @staticmethod
+    def _build_generic_insert(table: str, rows: list[dict]) -> str:
+        """Build INSERT SQL for any table using VARCHAR columns."""
+        if not rows:
+            return ""
+        columns = list(rows[0].keys())
+        col_list = ", ".join(columns)
+        values = []
+        for r in rows:
+            vals = ", ".join(f"'{_esc(r.get(c, ''))}'" for c in columns)
+            values.append(f"({vals})")
+        return f"INSERT INTO {table} ({col_list}) VALUES " + ", ".join(values)
 
     def _execute_sql(self, sql: str, description: str) -> bool:
         """Execute a SQL statement via Presto REST API and poll until complete."""

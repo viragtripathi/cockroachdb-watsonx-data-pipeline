@@ -24,6 +24,7 @@ CREATE TABLE iceberg_data.banko.expenses (
     shopping_type VARCHAR,
     payment_method VARCHAR,
     recurring BOOLEAN,
+    cdc_table VARCHAR,
     cdc_operation VARCHAR,
     cdc_timestamp VARCHAR
 )

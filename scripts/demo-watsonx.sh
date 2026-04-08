@@ -14,10 +14,11 @@
 #   - COS bucket connected to watsonx.data
 #
 # Usage:
-#   ./scripts/demo-watsonx.sh                    # Full demo (all 5 acts)
-#   ./scripts/demo-watsonx.sh --act 1            # Run specific act
-#   ./scripts/demo-watsonx.sh --skip-cdc         # Skip CDC pipeline (federation only)
-#   ./scripts/demo-watsonx.sh --crdb-url "..."   # Custom CockroachDB URL
+#   ./scripts/demo-watsonx.sh                         # Full demo with expenses (all 5 acts)
+#   ./scripts/demo-watsonx.sh --workload tpcc         # TPC-C workload demo
+#   ./scripts/demo-watsonx.sh --act 1                 # Run specific act
+#   ./scripts/demo-watsonx.sh --skip-cdc              # Skip CDC pipeline (federation only)
+#   ./scripts/demo-watsonx.sh --crdb-url "..."        # Custom CockroachDB URL
 #
 set -euo pipefail
 
@@ -28,6 +29,9 @@ PIPELINE_URL="${PIPELINE_URL:-http://localhost:5002}"
 BATCH_PAUSE="${BATCH_PAUSE:-15}"
 ACT="${ACT:-all}"
 SKIP_CDC="${SKIP_CDC:-false}"
+WORKLOAD="${WORKLOAD:-expenses}"
+TPCC_WAREHOUSES="${TPCC_WAREHOUSES:-1}"
+TPCC_DURATION="${TPCC_DURATION:-60s}"
 
 # Colors
 RED='\033[0;31m'
@@ -41,8 +45,8 @@ NC='\033[0m'
 print_banner() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║${NC}  ${BOLD}CockroachDB + IBM watsonx.data Integration Demo${NC}            ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  Federation | CDC to Iceberg | Hybrid JOINs               ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  ${BOLD}CockroachDB + IBM watsonx.data Integration Demo ${NC}            ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  Federation | CDC to Iceberg | Hybrid JOINs                  ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -77,21 +81,110 @@ wait_for_user() {
 
 run_crdb_sql() {
     if [ -n "$CRDB_URL" ]; then
-        cockroach sql --url "$CRDB_URL" --execute "$1" 2>/dev/null
+        cockroach sql --url "$CRDB_URL" --execute "$1" 2>&1 || true
     else
-        docker exec "$CRDB_DOCKER" cockroach sql --insecure --execute "$1" 2>/dev/null
+        docker exec "$CRDB_DOCKER" cockroach sql --insecure --execute "$1" 2>&1 || true
     fi
 }
+
+run_crdb_sql_db() {
+    local db=$1
+    local sql=$2
+    if [ -n "$CRDB_URL" ]; then
+        local url
+        url=$(echo "$CRDB_URL" | sed "s|/[^?]*|/${db}|")
+        cockroach sql --url "$url" --execute "$sql" 2>&1 || true
+    else
+        docker exec "$CRDB_DOCKER" cockroach sql --insecure -d "$db" --execute "$sql" 2>&1 || true
+    fi
+}
+
+tpcc_url() {
+    if [ -n "$CRDB_URL" ]; then
+        echo "$CRDB_URL" | sed "s|/[^?]*|/tpcc|"
+    else
+        echo "postgresql://root@localhost:26257/tpcc?sslmode=disable"
+    fi
+}
+
+show_help() {
+    cat <<'EOF'
+CockroachDB + IBM watsonx.data Integration Demo
+
+USAGE:
+  ./scripts/demo-watsonx.sh [OPTIONS]
+
+WORKLOADS:
+  (default)          Banko expenses demo (requires Banko AI app data)
+  --workload tpcc    TPC-C industry-standard OLTP benchmark
+
+EXAMPLES:
+  # Expenses demo (all acts)
+  ./scripts/demo-watsonx.sh --crdb-url "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+
+  # Expenses demo, skip CDC (federation + CTAS only)
+  ./scripts/demo-watsonx.sh --crdb-url "..." --skip-cdc
+
+  # TPC-C demo (all acts, fully automated)
+  ./scripts/demo-watsonx.sh --workload tpcc --crdb-url "postgresql://root@localhost:26257/tpcc?sslmode=disable"
+
+  # TPC-C with 5 warehouses and 2-minute workload
+  ./scripts/demo-watsonx.sh --workload tpcc --tpcc-warehouses 5 --tpcc-duration 120s
+
+  # Run a specific act only
+  ./scripts/demo-watsonx.sh --act 3
+  ./scripts/demo-watsonx.sh --workload tpcc --act 3
+
+  # Clean up before re-running
+  ./scripts/cleanup.sh                       # Reset all
+  ./scripts/cleanup.sh --workload tpcc       # Reset TPC-C only
+
+OPTIONS:
+  --workload TYPE       Workload type: expenses (default) or tpcc
+  --act N               Run a specific act (1-5) instead of all
+  --crdb-url URL        CockroachDB connection URL
+  --pipeline-url URL    CDC pipeline URL (default: http://localhost:5002)
+  --skip-cdc            Skip the CDC pipeline act (expenses only)
+  --batch-pause SECS    Seconds to wait for batch flush (default: 15)
+  --tpcc-warehouses N   TPC-C warehouse count (default: 1)
+  --tpcc-duration DUR   TPC-C workload duration (default: 60s)
+  -h, --help            Show this help
+
+ACTS (expenses):
+  1  Show existing OLTP data from Banko AI demo
+  2  Federation: verify live connection (on-ramp to Iceberg)
+  3  CTAS: materialize OLTP data into Iceberg
+  4  CDC: stream inserts/updates/deletes to Iceberg
+  5  Hybrid JOINs: live + CDC + snapshot in one query
+
+ACTS (tpcc):
+  1  Initialize TPC-C workload (cockroach workload init)
+  2  Start CDC pipeline + create changefeed on 7 tables
+  3  Run TPC-C workload (generate transactions)
+  4  Query TPC-C CDC data in watsonx.data
+  5  Summary + Iceberg features
+EOF
+    exit 0
+}
+
+# Show help if no arguments
+if [[ $# -eq 0 ]]; then
+    show_help
+fi
 
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help) show_help ;;
         --act) ACT="$2"; shift 2 ;;
         --skip-cdc) SKIP_CDC=true; shift ;;
         --crdb-url) CRDB_URL="$2"; shift 2 ;;
         --pipeline-url) PIPELINE_URL="$2"; shift 2 ;;
         --batch-pause) BATCH_PAUSE="$2"; shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        --workload) WORKLOAD="$2"; shift 2 ;;
+        --tpcc-warehouses) TPCC_WAREHOUSES="$2"; shift 2 ;;
+        --tpcc-duration) TPCC_DURATION="$2"; shift 2 ;;
+        *) echo "Unknown option: $1 (use --help for usage)"; exit 1 ;;
     esac
 done
 
@@ -447,21 +540,251 @@ act5() {
     echo ""
 }
 
+# ================================================================
+# TPC-C WORKLOAD ACTS
+# ================================================================
+
+tpcc_act1() {
+    print_act 1 "Initialize TPC-C Workload"
+
+    print_note "TPC-C is the industry-standard OLTP benchmark."
+    print_note "Simulates warehouse/order processing with 9 tables."
+    echo ""
+
+    print_step "Initializing TPC-C with ${TPCC_WAREHOUSES} warehouse(s)..."
+    echo ""
+
+    local url
+    url=$(tpcc_url)
+    if cockroach workload init tpcc "$url" --warehouses="${TPCC_WAREHOUSES}" --drop 2>&1 | tail -3; then
+        echo ""
+        echo -e "  ${GREEN}TPC-C initialized successfully.${NC}"
+    else
+        echo -e "  ${YELLOW}Init returned an error (may already exist, continuing).${NC}"
+    fi
+
+    echo ""
+    print_step "Tables loaded:"
+    echo ""
+    run_crdb_sql_db tpcc "SELECT table_name, estimated_row_count FROM [SHOW TABLES FROM tpcc] ORDER BY estimated_row_count DESC;"
+    echo ""
+    print_note "With ${TPCC_WAREHOUSES} warehouse(s): ~600K rows of realistic OLTP data."
+    wait_for_user
+}
+
+tpcc_act2() {
+    print_act 2 "Start CDC Pipeline + Changefeed"
+
+    # Check pipeline
+    print_step "Checking CDC pipeline at ${PIPELINE_URL}..."
+    if curl -s "${PIPELINE_URL}/cdc/stats" > /dev/null 2>&1; then
+        local stats
+        stats=$(curl -s "${PIPELINE_URL}/cdc/stats")
+        echo -e "  ${GREEN}Pipeline running:${NC} ${stats}"
+    else
+        echo -e "  ${RED}Pipeline not running at ${PIPELINE_URL}.${NC}"
+        echo -e "  ${YELLOW}Start it in another terminal:${NC}  uv run crdb-wxd-pipeline webhook"
+        echo ""
+        echo -e "  ${BOLD}Press ENTER after the pipeline is running...${NC}"
+        read -r
+        # Recheck
+        if ! curl -s "${PIPELINE_URL}/cdc/stats" > /dev/null 2>&1; then
+            echo -e "  ${RED}Still not reachable. Continuing anyway (changefeed will retry).${NC}"
+        fi
+    fi
+
+    echo ""
+    print_step "Enabling rangefeed and creating changefeed on 7 TPC-C tables..."
+    echo ""
+
+    run_crdb_sql_db tpcc "SET CLUSTER SETTING kv.rangefeed.enabled = true;"
+
+    local CHANGEFEED_SQL="CREATE CHANGEFEED FOR \"order\", order_line, new_order, customer, district, stock, history INTO 'webhook-https://localhost:5002/cdc/events?insecure_tls_skip_verify=true' WITH updated, diff, resolved = '10s', min_checkpoint_frequency = '10s';"
+
+    local result
+    result=$(run_crdb_sql_db tpcc "$CHANGEFEED_SQL" 2>&1)
+    if echo "$result" | grep -qi "error\|already exists"; then
+        echo -e "  ${YELLOW}Changefeed may already exist or had an error:${NC}"
+        echo "  ${result}" | head -3
+        echo -e "  ${YELLOW}Continuing -- the pipeline will receive events if changefeed is active.${NC}"
+    else
+        echo -e "  ${GREEN}Changefeed created. CDC events flowing to pipeline.${NC}"
+    fi
+
+    echo ""
+    print_note "7 tables streaming: order, order_line, new_order, customer,"
+    print_note "district, stock, history. Pipeline auto-detects each table."
+    wait_for_user
+}
+
+tpcc_act3() {
+    print_act 3 "Run TPC-C Workload (Generate Transactions)"
+
+    print_note "Running cockroach workload run tpcc for ${TPCC_DURATION}."
+    print_note "This generates new orders, payments, deliveries, stock checks."
+    echo ""
+
+    print_step "Starting TPC-C workload..."
+    echo ""
+
+    local url
+    url=$(tpcc_url)
+
+    # Show pipeline stats before
+    if curl -s "${PIPELINE_URL}/cdc/stats" > /dev/null 2>&1; then
+        local before
+        before=$(curl -s "${PIPELINE_URL}/cdc/stats")
+        echo -e "  Pipeline before: ${before}"
+        echo ""
+    fi
+
+    # Run workload -- tolerate errors (e.g. connection issues)
+    if cockroach workload run tpcc "$url" \
+        --warehouses="${TPCC_WAREHOUSES}" \
+        --duration="${TPCC_DURATION}" \
+        --tolerate-errors 2>&1 | tail -15; then
+        echo ""
+        echo -e "  ${GREEN}TPC-C workload completed.${NC}"
+    else
+        echo ""
+        echo -e "  ${YELLOW}Workload exited with errors (this is OK -- partial data captured).${NC}"
+    fi
+
+    # Show pipeline stats after
+    echo ""
+    if curl -s "${PIPELINE_URL}/cdc/stats" > /dev/null 2>&1; then
+        local after
+        after=$(curl -s "${PIPELINE_URL}/cdc/stats")
+        echo -e "  Pipeline after: ${after}"
+    fi
+
+    echo ""
+    print_step "Waiting ${BATCH_PAUSE}s for final batch flush..."
+    sleep "${BATCH_PAUSE}"
+
+    if curl -s "${PIPELINE_URL}/cdc/stats" > /dev/null 2>&1; then
+        local final
+        final=$(curl -s "${PIPELINE_URL}/cdc/stats")
+        echo -e "  Pipeline final: ${final}"
+    fi
+
+    echo ""
+    print_note "CDC events have been captured. Query them in watsonx.data next."
+    wait_for_user
+}
+
+tpcc_act4() {
+    print_act 4 "Query TPC-C CDC Data in watsonx.data"
+
+    print_note "All TPC-C changes are now in Iceberg. Run these in the"
+    print_note "watsonx.data Query workspace (also in sql/demo-tpcc.sql)."
+    echo ""
+
+    print_query "-- CDC events by table and operation"
+    echo "    SELECT cdc_table, cdc_operation, COUNT(*) AS events"
+    echo "    FROM ("
+    echo "      SELECT cdc_table, cdc_operation FROM iceberg_data.tpcc.\"order\""
+    echo "      UNION ALL"
+    echo "      SELECT cdc_table, cdc_operation FROM iceberg_data.tpcc.order_line"
+    echo "      UNION ALL"
+    echo "      SELECT cdc_table, cdc_operation FROM iceberg_data.tpcc.customer"
+    echo "      UNION ALL"
+    echo "      SELECT cdc_table, cdc_operation FROM iceberg_data.tpcc.stock"
+    echo "    )"
+    echo "    GROUP BY cdc_table, cdc_operation"
+    echo "    ORDER BY cdc_table, events DESC;"
+    echo ""
+
+    print_query "-- Order revenue by district"
+    echo "    SELECT ol_d_id AS district,"
+    echo "           COUNT(*) AS line_items,"
+    echo "           ROUND(SUM(CAST(ol_amount AS DOUBLE)), 2) AS revenue"
+    echo "    FROM iceberg_data.tpcc.order_line"
+    echo "    WHERE cdc_operation IN ('insert', 'snapshot')"
+    echo "    GROUP BY ol_d_id ORDER BY revenue DESC;"
+    echo ""
+
+    print_query "-- Customer balance changes (update events from payments)"
+    echo "    SELECT c_id, c_first, c_last, c_balance,"
+    echo "           cdc_operation, cdc_timestamp"
+    echo "    FROM iceberg_data.tpcc.customer"
+    echo "    WHERE cdc_operation = 'update'"
+    echo "    ORDER BY cdc_timestamp DESC LIMIT 10;"
+    echo ""
+
+    print_query "-- Low stock alerts"
+    echo "    SELECT s_i_id AS item, s_quantity AS qty, s_order_cnt AS orders"
+    echo "    FROM iceberg_data.tpcc.stock"
+    echo "    WHERE CAST(s_quantity AS BIGINT) < 15"
+    echo "    ORDER BY CAST(s_quantity AS BIGINT) LIMIT 10;"
+    echo ""
+
+    print_note "Full query set in sql/demo-tpcc.sql"
+    wait_for_user
+}
+
+tpcc_act5() {
+    print_act 5 "TPC-C: Summary"
+
+    print_step "Iceberg snapshots (run in watsonx.data):"
+    echo ""
+    print_query "SELECT * FROM iceberg_data.tpcc.\"order\\\$snapshots\" ORDER BY committed_at DESC;"
+    echo ""
+
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${BOLD}TPC-C CDC Pipeline Summary${NC}"
+    echo ""
+    echo -e "  ${GREEN}Workload${NC}    -- Industry-standard TPC-C (orders, payments, deliveries)"
+    echo -e "  ${GREEN}CDC${NC}         -- 7 tables streamed to Iceberg via changefeed"
+    echo -e "  ${GREEN}Analytics${NC}   -- Revenue, inventory, customer behavior on Iceberg"
+    echo -e "  ${GREEN}Zero impact${NC} -- All analytics decoupled from CockroachDB OLTP"
+    echo ""
+    echo -e "  ${BOLD}Production value:${NC}"
+    echo -e "  - Full audit trail of every order, payment, and stock change"
+    echo -e "  - Time travel: query data as it was at any point in time"
+    echo -e "  - Heavy analytics on Iceberg -- zero load on CockroachDB"
+    echo -e "  - Works with any CockroachDB table or workload"
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
 # --- Main ---
 print_banner
 
-case "$ACT" in
-    1) act1 ;;
-    2) act2 ;;
-    3) act3 ;;
-    4) act4 ;;
-    5) act5 ;;
-    all)
-        act1
-        act2
-        act3
-        [ "$SKIP_CDC" = false ] && act4
-        act5
-        ;;
-    *) echo "Unknown act: $ACT (use 1-5 or all)"; exit 1 ;;
-esac
+if [ "$WORKLOAD" = "tpcc" ]; then
+    echo -e "  ${BOLD}Workload: TPC-C${NC}"
+    echo ""
+    case "$ACT" in
+        1) tpcc_act1 ;;
+        2) tpcc_act2 ;;
+        3) tpcc_act3 ;;
+        4) tpcc_act4 ;;
+        5) tpcc_act5 ;;
+        all)
+            tpcc_act1
+            tpcc_act2
+            tpcc_act3
+            tpcc_act4
+            tpcc_act5
+            ;;
+        *) echo "Unknown act: $ACT (use 1-5 or all)"; exit 1 ;;
+    esac
+else
+    case "$ACT" in
+        1) act1 ;;
+        2) act2 ;;
+        3) act3 ;;
+        4) act4 ;;
+        5) act5 ;;
+        all)
+            act1
+            act2
+            act3
+            [ "$SKIP_CDC" = false ] && act4
+            act5
+            ;;
+        *) echo "Unknown act: $ACT (use 1-5 or all)"; exit 1 ;;
+    esac
+fi
