@@ -238,6 +238,7 @@ For non-expenses tables (e.g. TPC-C), all columns are stored as strings and the 
 │  Path 1: PostgreSQL wire protocol ──> Federation (live queries)     │
 │  Path 2: CREATE CHANGEFEED ──> Webhook ──> CDC Pipeline             │
 │  Path 3: Debezium connector ──> Kafka ──> CDC Pipeline              │
+│  Path 4: CREATE CHANGEFEED format=parquet ──> COS directly          │
 └──────┬──────────────────┬──────────────────────┬────────────────────┘
        │                  │                      │
        │         ┌────────▼────────┐  ┌──────────▼──────────┐
@@ -706,6 +707,29 @@ FROM iceberg_data.banko.expenses_snapshot;
 ```
 
 See `sql/federation-setup.sql` for complete setup instructions and `sql/demo-federation.sql` for a guided walkthrough of all three patterns.
+
+## Direct Parquet to COS (Path 4)
+
+CockroachDB changefeeds support `format=parquet` natively with cloud storage sinks. Since IBM COS is S3-compatible, you can write Parquet files directly from CockroachDB to COS -- no pipeline needed for the file write.
+
+```sql
+CREATE CHANGEFEED FOR expenses
+INTO 's3://{BUCKET}/cdc/expenses/?AWS_ACCESS_KEY_ID={KEY}&AWS_SECRET_ACCESS_KEY={SECRET}&AWS_ENDPOINT=https://{COS_ENDPOINT}&AWS_REGION=us-south'
+WITH format = parquet, updated, diff, resolved = '10s', partition_format = 'daily';
+```
+
+This eliminates the webhook/Kafka pipeline for the Parquet conversion step. However, the Parquet files land as raw files on COS -- they are **not** in Iceberg format. To get Iceberg features (time travel, snapshots, partition pruning), you still need a Spark or Presto job to load the Parquet files into Iceberg tables.
+
+> **Note**: CockroachDB's Parquet writer does not support `VECTOR` columns. Use a CDC query (`AS SELECT ...`) to exclude them. Tables without VECTOR columns (e.g., TPC-C) work with standard `CREATE CHANGEFEED FOR table`.
+
+| Path                   | Parquet Conversion | Iceberg             | Best For                                   |
+|------------------------|--------------------|---------------------|--------------------------------------------|
+| Webhook/Kafka pipeline | Pipeline           | Yes (Presto INSERT) | Full Iceberg features, real-time dashboard |
+| Direct Parquet to COS  | CockroachDB native | No (raw files)      | Simple archive, Spark batch load           |
+
+CockroachDB auto-adds metadata columns: `__crdb__event_type` (c/u/d), `__crdb__updated`, `__crdb__before` (diff).
+
+See `sql/create-changefeed-cos-parquet.sql` for the full SQL with IBM COS HMAC credentials.
 
 ## TPC-C Workload Demo
 
