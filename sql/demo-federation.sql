@@ -88,15 +88,19 @@ ORDER BY committed_at DESC;
 -- Drop previous snapshot if exists
 DROP TABLE IF EXISTS iceberg_data.banko.expenses_snapshot;
 
--- Materialize current CockroachDB state into Iceberg
+-- Materialize current CockroachDB state into Iceberg.
+-- NOTE: cast expense_id and user_id to VARCHAR. CockroachDB's federated
+-- columns come through as Presto UUID type, but the CDC table stores them
+-- as VARCHAR. Casting at CTAS time means downstream JOINs don't need to
+-- cast (Presto refuses '=' between varchar and uuid).
 CREATE TABLE iceberg_data.banko.expenses_snapshot
 WITH (
     format = 'PARQUET',
     partitioning = ARRAY['shopping_type']
 )
 AS
-SELECT expense_id,
-       user_id,
+SELECT CAST(expense_id AS VARCHAR) AS expense_id,
+       CAST(user_id    AS VARCHAR) AS user_id,
        description,
        merchant,
        expense_amount,
@@ -192,7 +196,7 @@ FROM iceberg_data.banko.expenses cdc
 LEFT JOIN cockroachdb.public.expenses live
   ON cdc.expense_id = CAST(live.expense_id AS VARCHAR)
 LEFT JOIN iceberg_data.banko.expenses_snapshot snap
-  ON cdc.expense_id = snap.expense_id
+  ON cdc.expense_id = CAST(snap.expense_id AS VARCHAR)
 GROUP BY live.expense_id, cdc.expense_id, live.merchant, cdc.merchant,
          live.expense_amount, snap.expense_amount
 ORDER BY total_cdc_events DESC

@@ -1,14 +1,22 @@
-"""Presto SQL writer for inserting CDC batches into Iceberg tables via watsonx.data Presto REST API.
+"""Presto SQL writer for inserting CDC batches into Iceberg tables.
 
-Flow:
-  1. Get IAM bearer token from IBM Cloud (cached, auto-refreshes)
-  2. POST INSERT SQL to Presto /v1/statement
-  3. Poll nextUri until FINISHED or FAILED
+Supports two authentication modes:
+  - IBM Cloud watsonx.data: IAM bearer token from cloud.ibm.com (apikey -> token)
+  - Local watsonx.data Developer Edition: HTTP Basic auth (ibmlhadmin / password)
+
+The mode is selected automatically based on which env vars are set:
+  - WATSONX_DATA_USERNAME + WATSONX_DATA_PASSWORD -> local mode
+  - WATSONX_DATA_API_KEY                          -> cloud mode
+
+Flow (both modes):
+  1. POST INSERT SQL to Presto /v1/statement
+  2. Poll nextUri until FINISHED or FAILED
 """
 
 import time
 
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -27,18 +35,31 @@ class PrestoWriter:
         self._token: str | None = None
         self._token_expiry: float = 0
         self.engine_host = config.presto_engine_host
+        self.engine_port = config.presto_port
         self.catalog = config.wxd_catalog
         self.namespace = config.wxd_namespace
         self.api_key = config.wxd_api_key
+        self.username = config.wxd_username
+        self.password = config.wxd_password
+        self.verify_ssl = config.wxd_verify_ssl
+        self.local_mode = config.wxd_local_mode
         self._session = self._build_session()
 
         if not self.engine_host:
             raise ValueError(
                 "PRESTO_ENGINE_HOST is required. "
-                "Find it in watsonx.data console > Presto engine > Connection information > engine_host"
+                "Cloud: find in watsonx.data console > Presto engine > Connection information. "
+                "Local DE: set to 'localhost' (with PRESTO_PORT=8443) after port-forwarding."
             )
-        if not self.api_key:
-            raise ValueError("WATSONX_DATA_API_KEY is required for Presto authentication")
+        if not (self.api_key or (self.username and self.password)):
+            raise ValueError(
+                "Presto auth required. "
+                "Cloud: set WATSONX_DATA_API_KEY. "
+                "Local DE: set WATSONX_DATA_USERNAME and WATSONX_DATA_PASSWORD."
+            )
+
+        if not self.verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     @staticmethod
     def _build_session() -> requests.Session:
@@ -46,10 +67,39 @@ class PrestoWriter:
         retry = Retry(total=3, backoff_factor=1, status_forcelist=[502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry)
         session.mount("https://", adapter)
+        session.mount("http://", adapter)
         return session
 
+    @property
+    def _statement_url(self) -> str:
+        return f"https://{self.engine_host}:{self.engine_port}/v1/statement"
+
+    @property
+    def _presto_user(self) -> str:
+        # Local DE uses the basic-auth username; cloud uses "admin"
+        return self.username if self.local_mode else "admin"
+
+    def _request_kwargs(self) -> dict:
+        """Auth + TLS kwargs applied to every Presto request."""
+        if self.local_mode:
+            return {"auth": (self.username, self.password), "verify": self.verify_ssl}
+        return {"verify": self.verify_ssl}
+
+    def _request_headers(self, content_type: str | None = None) -> dict:
+        headers = {
+            "X-Presto-User": self._presto_user,
+            "X-Presto-Catalog": self.catalog,
+            "X-Presto-Schema": self.namespace,
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        if not self.local_mode:
+            # Cloud uses bearer; local uses basic auth (handled via session.auth)
+            headers["Authorization"] = f"Bearer {self._get_iam_token()}"
+        return headers
+
     def _get_iam_token(self) -> str:
-        """Get or refresh an IAM bearer token."""
+        """Get or refresh an IAM bearer token (cloud mode only)."""
         if self._token and time.monotonic() < self._token_expiry:
             return self._token
 
@@ -118,36 +168,36 @@ class PrestoWriter:
     def _execute_sql(self, sql: str, description: str) -> bool:
         """Execute a SQL statement via Presto REST API and poll until complete."""
         try:
-            token = self._get_iam_token()
+            headers = self._request_headers(content_type="text/plain")
         except Exception as e:
-            print(f"❌ Presto: IAM token error: {e}")
+            print(f"❌ Presto: auth error: {e}")
             return False
 
-        presto_url = f"https://{self.engine_host}/v1/statement"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "text/plain",
-            "X-Presto-User": "admin",
-            "X-Presto-Catalog": self.catalog,
-            "X-Presto-Schema": self.namespace,
-        }
-
         try:
-            resp = self._session.post(presto_url, headers=headers, data=sql, timeout=30)
+            resp = self._session.post(
+                self._statement_url, headers=headers, data=sql, timeout=30,
+                **self._request_kwargs(),
+            )
             resp.raise_for_status()
             result = resp.json()
         except requests.RequestException as e:
             print(f"❌ Presto POST failed: {e}")
             return False
 
-        return self._poll_until_done(result, token, description)
+        return self._poll_until_done(result, description)
 
-    def _poll_until_done(self, result: dict, token: str, description: str) -> bool:
+    def _poll_until_done(self, result: dict, description: str) -> bool:
         """Poll Presto nextUri until the statement reaches FINISHED or FAILED."""
         next_uri = result.get("nextUri")
         state = result.get("stats", {}).get("state", "UNKNOWN")
         query_id = result.get("id", "?")
         start = time.monotonic()
+        kwargs = self._request_kwargs()
+
+        # Headers for polling: preserve auth (bearer in cloud, basic in local handled via kwargs)
+        poll_headers = {}
+        if not self.local_mode:
+            poll_headers["Authorization"] = f"Bearer {self._get_iam_token()}"
 
         while next_uri and state not in ("FINISHED", "FAILED"):
             if time.monotonic() - start > POLL_MAX_WAIT:
@@ -156,11 +206,7 @@ class PrestoWriter:
 
             time.sleep(POLL_INTERVAL)
             try:
-                poll_resp = self._session.get(
-                    next_uri,
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=30,
-                )
+                poll_resp = self._session.get(next_uri, headers=poll_headers, timeout=30, **kwargs)
                 poll_resp.raise_for_status()
                 result = poll_resp.json()
                 next_uri = result.get("nextUri")
@@ -182,25 +228,16 @@ class PrestoWriter:
     def verify_connection(self) -> bool:
         """Run a trivial query to verify Presto connectivity."""
         try:
-            token = self._get_iam_token()
+            headers = self._request_headers(content_type="text/plain")
         except Exception as e:
-            print(f"❌ Presto verify: IAM token error: {e}")
+            print(f"❌ Presto verify: auth error: {e}")
             return False
 
-        presto_url = f"https://{self.engine_host}/v1/statement"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "text/plain",
-            "X-Presto-User": "admin",
-            "X-Presto-Catalog": self.catalog,
-            "X-Presto-Schema": self.namespace,
-        }
         try:
             resp = self._session.post(
-                presto_url,
-                headers=headers,
+                self._statement_url, headers=headers,
                 data=f"SELECT COUNT(*) FROM {self.catalog}.{self.namespace}.expenses",
-                timeout=30,
+                timeout=30, **self._request_kwargs(),
             )
             resp.raise_for_status()
             result = resp.json()
@@ -211,24 +248,17 @@ class PrestoWriter:
             print(f"❌ Presto connection failed: {e}")
             return False
 
-
     def query(self, sql: str) -> list[dict]:
         """Execute a SELECT and return rows as list of dicts."""
         try:
-            token = self._get_iam_token()
+            headers = self._request_headers(content_type="text/plain")
         except Exception as e:
-            raise RuntimeError(f"IAM token error: {e}") from e
+            raise RuntimeError(f"Presto auth error: {e}") from e
 
-        presto_url = f"https://{self.engine_host}/v1/statement"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "text/plain",
-            "X-Presto-User": "admin",
-            "X-Presto-Catalog": self.catalog,
-            "X-Presto-Schema": self.namespace,
-        }
-
-        resp = self._session.post(presto_url, headers=headers, data=sql, timeout=30)
+        kwargs = self._request_kwargs()
+        resp = self._session.post(
+            self._statement_url, headers=headers, data=sql, timeout=30, **kwargs,
+        )
         resp.raise_for_status()
         result = resp.json()
 
@@ -240,13 +270,13 @@ class PrestoWriter:
         if result.get("data"):
             all_data.extend(result["data"])
 
+        poll_headers = {}
+        if not self.local_mode:
+            poll_headers["Authorization"] = f"Bearer {self._get_iam_token()}"
+
         while next_uri:
             time.sleep(POLL_INTERVAL)
-            poll_resp = self._session.get(
-                next_uri,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=30,
-            )
+            poll_resp = self._session.get(next_uri, headers=poll_headers, timeout=30, **kwargs)
             poll_resp.raise_for_status()
             result = poll_resp.json()
             if result.get("columns") and not columns:

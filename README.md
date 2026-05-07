@@ -54,11 +54,12 @@ Both CDC paths feed into the same processor that batches events, writes Parquet,
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose (optional, for containerized setup)
-- CockroachDB v25.4+ (included in docker-compose or use CockroachDB Cloud)
-- IBM Cloud account with:
-  - IBM Cloud Object Storage instance + bucket
-  - watsonx.data instance (Lite or Enterprise plan)
-  - IBM Cloud API key ([create one here](https://cloud.ibm.com/iam/apikeys))
+- CockroachDB v25.4+ (included in docker-compose, run locally, or use CockroachDB Cloud)
+- One of the following for the lakehouse:
+  - **Local watsonx.data Developer Edition** running on `kind` (free, runs on your laptop) -- see [Local Developer Edition Setup](#local-watsonxdata-developer-edition-setup) below
+  - **IBM Cloud watsonx.data** (Lite or Enterprise) + IBM Cloud Object Storage + an [IBM Cloud API key](https://cloud.ibm.com/iam/apikeys) -- see [IBM Cloud Setup Guide](#ibm-cloud-setup-guide) below
+
+The pipeline auto-detects which target to use based on env vars: set `WATSONX_DATA_USERNAME`/`PASSWORD` for local DE, or `WATSONX_DATA_API_KEY` for IBM Cloud. Same code, same demo scripts, same SQL.
 
 ### Option 1: Webhook CDC (Zero Infrastructure)
 
@@ -172,7 +173,7 @@ All settings via environment variables:
 | `KAFKA_GROUP_ID`          | Consumer group         | `crdb-wxd-pipeline`              |
 | `KAFKA_AUTO_OFFSET_RESET` | Offset reset policy    | `earliest`                       |
 
-### IBM Cloud Object Storage
+### Object Storage -- IBM Cloud Object Storage (cloud watsonx.data)
 
 | Variable          | Description                                | Default          |
 |-------------------|--------------------------------------------|------------------|
@@ -182,18 +183,33 @@ All settings via environment variables:
 | `COS_BUCKET`      | Target bucket                              | `crdb-lakehouse` |
 | `COS_PREFIX`      | Object key prefix                          | `cdc/expenses/`  |
 
-When COS is not configured, Parquet files are written to `./cdc-output/` (or `CDC_LOCAL_OUTPUT`).
+### Object Storage -- S3-compatible (MinIO / local DE / any S3)
+
+| Variable        | Description                                       | Default          |
+|-----------------|---------------------------------------------------|------------------|
+| `S3_ENDPOINT`   | S3 API endpoint (e.g. `http://localhost:9000`)    | --               |
+| `S3_ACCESS_KEY` | Access key ID                                     | --               |
+| `S3_SECRET_KEY` | Secret access key                                 | --               |
+| `S3_REGION`     | AWS region (MinIO accepts any value)              | `us-east-1`      |
+| `S3_BUCKET`     | Target bucket                                     | `iceberg-bucket` |
+| `S3_PREFIX`     | Object key prefix                                 | `cdc/expenses/`  |
+
+When neither set is configured, Parquet files are written to `./cdc-output/` (or `CDC_LOCAL_OUTPUT`). When both are set, S3 wins.
 
 ### watsonx.data / Presto (Iceberg Table Insert)
 
-| Variable                 | Description                                        | Default        |
-|--------------------------|----------------------------------------------------|----------------|
-| `PRESTO_ENGINE_HOST`     | Presto engine hostname (from watsonx.data console) | --             |
-| `WATSONX_DATA_API_KEY`   | IBM Cloud platform API key                         | --             |
-| `WATSONX_DATA_CATALOG`   | Iceberg catalog name in watsonx.data               | `iceberg_data` |
-| `WATSONX_DATA_NAMESPACE` | Iceberg namespace (schema)                         | `banko`        |
+| Variable                  | Description                                                         | Default        |
+|---------------------------|---------------------------------------------------------------------|----------------|
+| `PRESTO_ENGINE_HOST`      | Presto hostname (cloud: from console; local DE: `localhost`)        | --             |
+| `PRESTO_PORT`             | Presto HTTPS port (cloud: `443`; local DE: `8443`)                  | `443`          |
+| `WATSONX_DATA_API_KEY`    | IBM Cloud platform API key (**cloud mode**)                         | --             |
+| `WATSONX_DATA_USERNAME`   | Basic-auth username (**local DE mode**, e.g. `ibmlhadmin`)          | --             |
+| `WATSONX_DATA_PASSWORD`   | Basic-auth password (**local DE mode**)                             | --             |
+| `WATSONX_DATA_VERIFY_SSL` | Verify Presto TLS cert (set `false` for local DE self-signed)       | `true`         |
+| `WATSONX_DATA_CATALOG`    | Iceberg catalog name in watsonx.data                                | `iceberg_data` |
+| `WATSONX_DATA_NAMESPACE`  | Iceberg namespace (schema)                                          | `banko`        |
 
-When `PRESTO_ENGINE_HOST` and `WATSONX_DATA_API_KEY` are set, the pipeline inserts each batch into the Iceberg table via the Presto REST API after writing Parquet to COS. When not set, only COS/local writes occur.
+**Auth mode is auto-detected.** If `WATSONX_DATA_USERNAME`/`PASSWORD` are set, the pipeline uses HTTP Basic auth (local DE). Otherwise it uses an IAM bearer token (IBM Cloud) with `WATSONX_DATA_API_KEY`. When neither is set, the pipeline writes Parquet only and skips Iceberg INSERTs.
 
 ## Output Format
 
@@ -270,6 +286,145 @@ For non-expenses tables (e.g. TPC-C), all columns are stored as strings and the 
   │ live)    │    │  Hybrid JOINs across all three tables    │
   └──────────┘    └──────────────────────────────────────────┘
 ```
+
+## Local watsonx.data Developer Edition Setup
+
+If you don't have an IBM Cloud account (or just want to develop offline), [watsonx.data Developer Edition](https://www.ibm.com/docs/en/watsonx/watsonxdata/2.0.x?topic=installing-watsonxdata-developer-edition) runs the full lakehouse stack on your laptop in a `kind` Kubernetes cluster -- Presto + Iceberg + MinIO + Hive metastore, all in one install. The pipeline supports it out of the box.
+
+### Step 1: Confirm your DE install is running
+
+After you complete the official Developer Edition installer, you should see these pods in the `wxd` namespace:
+
+```bash
+kubectl -n wxd get pods
+# ibm-lh-presto-...     Running
+# ibm-lh-minio-...      Running
+# ibm-lh-mds-thrift-... Running
+# lhconsole-ui-...      Running
+# ...
+```
+
+The installer typically port-forwards the **console UI**, **MinIO UI** (port 9001), and **MDS Thrift** for you. The pipeline additionally needs **Presto** (port 8443) and **MinIO S3 API** (port 9000) reachable from your host.
+
+### Step 2: Port-forward Presto and MinIO S3
+
+```bash
+./scripts/port-forward-wxd.sh
+# Starts kubectl port-forwards for:
+#   localhost:8443 -> ibm-lh-presto-svc:8443  (Presto REST API, basic auth)
+#   localhost:9000 -> ibm-lh-minio-svc:9000   (MinIO S3 API)
+```
+
+The script is idempotent -- safe to re-run if a port-forward dies.
+
+### Step 3: Source the local env file
+
+```bash
+source .env.local
+```
+
+This sets all the right values for the local stack:
+
+| Variable                     | Value                  | Notes                                               |
+|------------------------------|------------------------|-----------------------------------------------------|
+| `S3_ENDPOINT`                | `http://localhost:9000` | MinIO S3 API (after port-forward)                  |
+| `S3_ACCESS_KEY`              | `dummyvalue`           | DE default                                          |
+| `S3_SECRET_KEY`              | `dummyvalue`           | DE default                                          |
+| `S3_BUCKET`                  | `iceberg-bucket`       | Pre-created by DE installer                         |
+| `PRESTO_ENGINE_HOST`         | `localhost`            | After port-forward                                  |
+| `PRESTO_PORT`                | `8443`                 |                                                     |
+| `WATSONX_DATA_USERNAME`      | `ibmlhadmin`           | DE default                                          |
+| `WATSONX_DATA_PASSWORD`      | `password`             | DE default                                          |
+| `WATSONX_DATA_VERIFY_SSL`    | `false`                | DE uses a self-signed cert                          |
+| `WATSONX_DATA_CATALOG`       | `iceberg_data`         | Catalog auto-registered by DE                       |
+
+### Step 4: Create the Iceberg schema and table
+
+```bash
+# Via Presto REST API
+python3 - <<'EOF'
+import requests, urllib3, time
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+AUTH=("ibmlhadmin","password"); URL="https://localhost:8443/v1/statement"
+H={"X-Presto-User":"ibmlhadmin","Content-Type":"text/plain"}
+def run(sql):
+    r=requests.post(URL,headers=H,data=sql,auth=AUTH,verify=False,timeout=30); j=r.json()
+    while j.get("nextUri"):
+        time.sleep(0.3); j=requests.get(j["nextUri"],auth=AUTH,verify=False,timeout=30).json()
+        if j.get("stats",{}).get("state") in ("FINISHED","FAILED"): break
+    print(("✅" if j.get("stats",{}).get("state")=="FINISHED" else "❌"), sql[:60])
+for stmt in open("sql/watsonx-data-local-setup.sql").read().split(";"):
+    if stmt.strip(): run(stmt)
+EOF
+```
+
+Or paste the contents of `sql/watsonx-data-local-setup.sql` into the watsonx.data console at `https://localhost:6443` (login: `ibmlhadmin` / `password`).
+
+### Step 5: Run the pipeline
+
+```bash
+uv run crdb-wxd-pipeline webhook
+```
+
+You should see:
+
+```
+Sink: S3-compatible (http://localhost:9000 / bucket=iceberg-bucket)
+Presto: localhost:8443 -- local DE (basic auth)
+✅ Presto connection verified (query state: WAITING_FOR_PREREQUISITES)
+Iceberg: iceberg_data.banko.expenses via Presto
+
+CDC Webhook receiver starting on 0.0.0.0:5002
+```
+
+### Step 6: Send test events (or hook up a CockroachDB changefeed)
+
+```bash
+# Quick smoke test
+curl -X POST http://localhost:5002/cdc/events \
+  -H "Content-Type: application/json" \
+  -d '[{"after":{"expense_id":"test-1","user_id":"u1","description":"Coffee","merchant":"Starbucks","expense_amount":5.50,"expense_date":"2026-05-02","shopping_type":"Coffee","payment_method":"Debit Card","recurring":true}}]'
+
+# Or run the full demo
+uv run python scripts/demo.py
+```
+
+### Step 7: Verify
+
+```bash
+# Parquet files in MinIO
+uv run crdb-wxd-pipeline stats --s3
+
+# Rows in Iceberg
+python3 -c "
+import requests, urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+r = requests.post('https://localhost:8443/v1/statement',
+    headers={'X-Presto-User':'ibmlhadmin','Content-Type':'text/plain'},
+    auth=('ibmlhadmin','password'), verify=False,
+    data='SELECT cdc_operation, COUNT(*) FROM iceberg_data.banko.expenses GROUP BY cdc_operation')
+print(r.json())
+"
+```
+
+You can also browse the data in the watsonx.data console at `https://localhost:6443` (Query workspace > pick the `presto` engine > query `iceberg_data.banko.expenses`).
+
+### Wiring the CockroachDB changefeed for the local pipeline
+
+```bash
+# In your local CockroachDB (the same one .env.local points at)
+cockroach sql --insecure --url "postgresql://root@localhost:26257/defaultdb?sslmode=disable" < sql/setup.sql
+cockroach sql --insecure --url "postgresql://root@localhost:26257/defaultdb?sslmode=disable" -e "
+CREATE CHANGEFEED FOR TABLE expenses
+INTO 'webhook-http://host.docker.internal:5002/cdc/events?insecure_tls_skip_verify=true'
+WITH updated, diff, resolved = '30s';
+"
+# Substitute host.docker.internal -> localhost if CockroachDB is not in Docker
+```
+
+From here every demo script in `scripts/` and every SQL file in `sql/` works against the local stack with no changes -- they just read the same env vars.
+
+---
 
 ## IBM Cloud Setup Guide
 

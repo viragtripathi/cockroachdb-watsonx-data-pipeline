@@ -48,15 +48,19 @@ SELECT COUNT(*) AS total_expenses FROM cockroachdb.public.expenses;
 -- optimized for analytical scans, decoupled from OLTP.
 -- Run periodically (e.g. hourly/daily) to refresh the snapshot.
 
--- Create a point-in-time snapshot of all expenses
+-- Create a point-in-time snapshot of all expenses.
+-- NOTE: cast expense_id and user_id to VARCHAR. CockroachDB's federated
+-- columns come through as Presto UUID type, but the CDC table stores them
+-- as VARCHAR. Casting at CTAS time means downstream JOINs don't need to
+-- cast (Presto refuses '=' between varchar and uuid).
 CREATE TABLE iceberg_data.banko.expenses_snapshot
 WITH (
     format = 'PARQUET',
     partitioning = ARRAY['shopping_type']
 )
 AS
-SELECT expense_id,
-       user_id,
+SELECT CAST(expense_id AS VARCHAR) AS expense_id,
+       CAST(user_id    AS VARCHAR) AS user_id,
        description,
        merchant,
        expense_amount,

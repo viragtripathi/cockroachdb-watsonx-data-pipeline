@@ -7,8 +7,12 @@ build/
 .venv/
 venv/
 .env
+.env.local
+.env.*.local
 cdc-output/
+demo-backup/
 *.parquet
+/tmp/crdb-wxd-pipeline.log
 .idea/
 .vscode/
 .ruff_cache/
