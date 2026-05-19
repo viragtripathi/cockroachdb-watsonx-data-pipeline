@@ -21,23 +21,27 @@ cd "$(dirname "$0")/.."
 # ---------------- Config ----------------
 NS="${WXD_NAMESPACE:-wxd}"
 PODMAN_MACHINE="${PODMAN_MACHINE:-podman-wxd}"
-CRDB_URL="postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+CRDB_URL="${CRDB_URL:-postgresql://root@127.0.0.1:26257/defaultdb?sslmode=disable}"
 PIPELINE_URL="https://localhost:5002"
 PRESTO_URL="https://localhost:8443"
 MINIO_URL="http://localhost:9000"
 ENV_FILE=".env.local"
 PIPELINE_LOG="/tmp/crdb-wxd-pipeline.log"
 
-CHECK_ONLY=0; QUIET=0
+CHECK_ONLY=0; QUIET=0; NO_INSTALLER=0
 for arg in "$@"; do
     case "$arg" in
-        --check-only) CHECK_ONLY=1 ;;
-        --quiet)      QUIET=1 ;;
+        --check-only)   CHECK_ONLY=1 ;;
+        --quiet)        QUIET=1 ;;
+        --no-installer) NO_INSTALLER=1 ;;   # don't auto-launch IBM installer if wxd missing
         --help|-h)
             sed -n '2,16p' "$0"; exit 0 ;;
         *) echo "unknown arg: $arg"; exit 2 ;;
     esac
 done
+
+WXD_INSTALLER_APP="/Applications/IBM watsonx.data developer edition installer.app"
+WXD_INSTALL_WAIT_MAX=2400   # 40 min — IBM installer can take a while on first run
 
 # ---------------- Output helpers ----------------
 EXIT=0
@@ -97,31 +101,125 @@ fi
 # ---------------- LEVEL 2: Kubernetes / wxd install ----------------
 hr "L2. Kubernetes (kind cluster + wxd namespace)"
 
-# Wait briefly for kubectl to reach the cluster API (it can take a moment after machine start)
-KUBE_OK=0
-for i in 1 2 3 4 5 6; do
-    if kubectl get ns >/dev/null 2>&1; then KUBE_OK=1; break; fi
-    [[ $i -gt 1 ]] && info "waiting for cluster API (${i}x5s)..."
-    sleep 5
-done
-if [[ "${KUBE_OK}" -eq 0 ]]; then
-    fail "Cannot reach the Kubernetes API"
-    info "Check: kubectl config current-context  -- should point at your wxd cluster"
+# Distinguish three states:
+#   - Cluster reachable + wxd ns present  → continue
+#   - Cluster reachable + wxd ns missing  → install is gone, need installer
+#   - Cluster not reachable               → either transient (wait) or install is gone
+
+wait_for_kube() {
+    local max="$1"
+    local elapsed=0
+    while [[ "${elapsed}" -lt "${max}" ]]; do
+        if kubectl get ns >/dev/null 2>&1; then return 0; fi
+        sleep 5; elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+# Quick check: is anything listening on the kubeconfig server URL? If not,
+# this is almost certainly a missing install, not a transient blip.
+KUBE_API=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null \
+    | sed -E 's|^https?://||')
+KUBE_HOST="${KUBE_API%:*}"; KUBE_PORT="${KUBE_API##*:}"
+LIKELY_GONE=0
+if [[ -n "${KUBE_PORT}" ]] && [[ "${KUBE_HOST}" =~ ^(localhost|127\.0\.0\.1|0\.0\.0\.0)$ ]]; then
+    if ! lsof -nP -iTCP:"${KUBE_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+        LIKELY_GONE=1
+    fi
+fi
+
+# First attempt: short wait (transient)
+if wait_for_kube 30; then
+    ok "Cluster API reachable (context: $(kubectl config current-context 2>/dev/null))"
+elif [[ "$CHECK_ONLY" -eq 1 ]] || [[ "$NO_INSTALLER" -eq 1 ]]; then
+    fail "Cannot reach the Kubernetes API at ${KUBE_API}"
+    if [[ "${LIKELY_GONE}" -eq 1 ]]; then
+        info "Nothing is listening on ${KUBE_PORT} — wxd install is likely gone."
+        info "Recovery: re-run the IBM watsonx.data Developer Edition installer."
+        info "    open \"${WXD_INSTALLER_APP}\""
+    else
+        info "Cluster API was unreachable after 30s. Could be a slow start."
+    fi
     echo
     printf "Summary:\n"; for l in "${SUMMARY_LINES[@]}"; do echo "  $l"; done
     exit 2
+elif [[ "${LIKELY_GONE}" -eq 0 ]]; then
+    # Port is listening but kubectl is failing — wait a bit longer for handshake
+    info "Cluster API not yet responding — waiting up to 60s more..."
+    if wait_for_kube 60; then
+        ok "Cluster API reachable (context: $(kubectl config current-context 2>/dev/null))"
+    else
+        fail "Cluster API still unreachable. Manual investigation needed."
+        echo
+        printf "Summary:\n"; for l in "${SUMMARY_LINES[@]}"; do echo "  $l"; done
+        exit 2
+    fi
+else
+    # LIKELY_GONE — install is missing. Auto-launch the IBM installer.
+    fail "Cluster API unreachable AND nothing listening on port ${KUBE_PORT}"
+    info "Diagnosis: the wxd kind cluster is gone (likely after a reboot or"
+    info "           podman machine deletion). The install needs to be redone."
+    echo
+    if [[ ! -d "${WXD_INSTALLER_APP}" ]]; then
+        fail "IBM installer not found at: ${WXD_INSTALLER_APP}"
+        info "Install the IBM watsonx.data Developer Edition app and re-run this script."
+        exit 2
+    fi
+    fix "launching the IBM watsonx.data DE installer..."
+    info "  When the window opens: click 'Install', then leave it running."
+    info "  This script will keep polling for the cluster to come back."
+    info "  (Ctrl-C to give up; the installer will keep running on its own.)"
+    PATH="/opt/podman/bin:$PATH" open "${WXD_INSTALLER_APP}" 2>&1 | sed 's/^/     /'
+    echo
+    info "Waiting up to $((WXD_INSTALL_WAIT_MAX/60)) min for cluster API + wxd namespace..."
+    POLL_START=$(date +%s)
+    CLUSTER_READY_AT=0
+    while true; do
+        sleep 15
+        ELAPSED=$(( $(date +%s) - POLL_START ))
+        if [[ "${CLUSTER_READY_AT}" -eq 0 ]] && kubectl get ns >/dev/null 2>&1; then
+            CLUSTER_READY_AT=${ELAPSED}
+            ok "Cluster API reachable after ${ELAPSED}s — now waiting for Helm release"
+        fi
+        if [[ "${CLUSTER_READY_AT}" -gt 0 ]] && kubectl get ns "${NS}" >/dev/null 2>&1; then
+            ok "namespace '${NS}' appeared after $((ELAPSED-CLUSTER_READY_AT))s — wxd install completed"
+            JUST_INSTALLED=1
+            break
+        fi
+        if [[ "${ELAPSED}" -gt "${WXD_INSTALL_WAIT_MAX}" ]]; then
+            fail "Install did not finish after $((ELAPSED/60)) min — giving up"
+            info "When the installer says it's done, re-run ./scripts/preflight-demo.sh"
+            exit 2
+        fi
+        if (( ELAPSED % 60 == 0 )); then
+            if [[ "${CLUSTER_READY_AT}" -gt 0 ]]; then
+                info "  ...waiting for Helm release to deploy (${ELAPSED}s elapsed)"
+            else
+                info "  ...waiting for kind cluster to start (${ELAPSED}s elapsed)"
+            fi
+        fi
+    done
 fi
-ok "Cluster API reachable (context: $(kubectl config current-context 2>/dev/null))"
 
 if ! kubectl get ns "${NS}" >/dev/null 2>&1; then
     fail "namespace '${NS}' does not exist"
-    info "Likely cause: wxd helm release was uninstalled, or the kind cluster was deleted."
-    info "Recovery: re-run the IBM watsonx.data Developer Edition installer (not auto-recoverable)."
+    info "The cluster is up, but the wxd Helm release isn't there."
+    info "Re-run the IBM watsonx.data DE installer."
     echo
     printf "Summary:\n"; for l in "${SUMMARY_LINES[@]}"; do echo "  $l"; done
     exit 2
 fi
 ok "namespace '${NS}' exists"
+
+# When we just installed, give the pods extra time to come up before declaring ready.
+if [[ "${JUST_INSTALLED:-0}" -eq 1 ]]; then
+    info "  fresh install — waiting up to 5 min for all pods to be Ready..."
+    if kubectl -n "${NS}" wait --for=condition=Ready pod --all --timeout=300s >/dev/null 2>&1; then
+        ok "all wxd pods Ready"
+    else
+        warn "some pods still not Ready after 5 min (this is OK — they may stabilize shortly)"
+    fi
+fi
 
 # Check pods
 NOT_READY=$(kubectl -n "${NS}" get pods --no-headers 2>/dev/null \
@@ -263,7 +361,7 @@ fi
 hr "L6. Data plane (catalog + schema + source data)"
 
 # Combined Presto probe with retries
-PRESTO_PROBE=$(python3 - <<'PYEOF' 2>/dev/null
+PRESTO_PROBE=$(uv run python3 - <<'PYEOF' 2>/dev/null
 import requests, urllib3, time, json
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 AUTH=('ibmlhadmin','password'); URL='https://localhost:8443/v1/statement'
@@ -318,7 +416,7 @@ if [[ "${HAS_SCHEMA}" != "True" || "${HAS_TABLE}" != "True" ]]; then
         warn "Iceberg schema/table missing (banko.expenses)"
     else
         fix "creating Iceberg schema + table (banko.expenses)..."
-        python3 - <<'PYEOF' 2>&1 | sed 's/^/     /'
+        uv run python3 - <<'PYEOF' 2>&1 | sed 's/^/     /'
 import requests, urllib3, time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 AUTH=('ibmlhadmin','password'); URL='https://localhost:8443/v1/statement'
