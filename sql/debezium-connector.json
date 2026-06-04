@@ -10,7 +10,6 @@
     "database.server.name": "crdb",
     "topic.prefix": "crdb",
     "table.include.list": "public.expenses",
-    "cockroachdb.changefeed.envelope": "enriched",
     "cockroachdb.changefeed.enriched.properties": "source,schema",
     "cockroachdb.changefeed.include.updated": true,
     "cockroachdb.changefeed.include.diff": true,

@@ -103,7 +103,26 @@ docker compose logs -f pipeline-kafka
 
 The database is initialized automatically via `sql/setup.sql` (mounted as docker-entrypoint-initdb).
 
-The [Debezium CockroachDB connector](https://github.com/debezium/debezium-connector-cockroachdb) is included in the official Debezium Connect image (`quay.io/debezium/connect:3.5.0.Final`) -- no need to build or copy JARs.
+> **The [Debezium CockroachDB connector](https://github.com/debezium/debezium-connector-cockroachdb) is NOT bundled in the stock `quay.io/debezium/connect` image.** It targets Debezium `3.6.0-SNAPSHOT` and must be built from source and mounted into the Connect container as a plugin:
+>
+> ```bash
+> # 1. Build the connector plugin (JDK 17+ and Maven 3.9.8+).
+> #    The connector compiles to Java 17 bytecode (debezium PR #35), so the
+> #    plugin loads in the stock Java-17 Debezium Connect image.
+> git clone https://github.com/debezium/debezium-connector-cockroachdb
+> cd debezium-connector-cockroachdb
+> ./mvnw clean package -Passembly
+> # produces target/plugin/ with the connector JARs
+>
+> # 2. Point the pipeline's connect service at that plugin dir.
+> #    3.6.0.Final is not released yet -- until it is, pin DEBEZIUM_VERSION to a
+> #    released Connect image tag (the Java-17 plugin loads fine in 3.5.x).
+> export DEBEZIUM_PLUGIN_PATH=/abs/path/to/debezium-connector-cockroachdb/target/plugin
+> export DEBEZIUM_VERSION=3.5.0.Final   # override until 3.6.0.Final ships
+> docker compose --profile kafka up -d
+> ```
+>
+> The `connect` service mounts `${DEBEZIUM_PLUGIN_PATH}` into `/kafka/connect` so Kafka Connect can load `io.debezium.connector.cockroachdb.CockroachDBConnector`. Without this, connector registration fails with "Failed to find any class that implements Connector".
 
 The Debezium CockroachDB connector topic name follows the pattern `<topic.prefix>.<database>.<schema>.<table>`. With the default connector config (`"topic.prefix": "crdb"`), the topic is `crdb.defaultdb.public.expenses`.
 
@@ -951,9 +970,9 @@ See `sql/demo-tpcc.sql` for the full set, including:
 
 ## Related Projects
 
-- [Banko AI Assistant](https://github.com/cockroachlabs-field/banko-ai-assistant-rag-demo) -- The OLTP application (RAG, agents, fraud detection)
+- [Banko AI Assistant](https://github.com/cockroachlabs-field/banko-ai-assistant) -- The OLTP application (RAG, agents, fraud detection)
 - [Debezium CockroachDB Connector](https://github.com/debezium/debezium-connector-cockroachdb) -- CDC connector for Kafka
-- [Debezium CockroachDB Demo](https://github.com/cockroachlabs-field/debezium-cockroachdb-demo) -- Debezium connector demo with Kafka
+- [Debezium CockroachDB Examples](https://github.com/viragtripathi/debezium-cockroachdb-examples) -- runnable Debezium connector examples (Kafka and sinkless)
 
 ## License
 

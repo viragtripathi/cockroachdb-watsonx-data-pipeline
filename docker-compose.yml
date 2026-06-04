@@ -2,7 +2,7 @@ services:
 
   # CockroachDB -- OLTP source
   cockroachdb:
-    image: cockroachdb/cockroach:${COCKROACHDB_VERSION:-v25.4.6}
+    image: cockroachdb/cockroach:${COCKROACHDB_VERSION:-v25.4.10}
     container_name: crdb-source
     hostname: cockroachdb
     command: start-single-node --insecure
@@ -91,7 +91,12 @@ services:
       - pipeline
 
   connect:
-    image: quay.io/debezium/connect:${DEBEZIUM_VERSION:-3.5.0.Final}
+    # The CockroachDB connector targets the Debezium 3.6 line and compiles to
+    # Java 17 bytecode (debezium PR #35), so it loads in the stock Connect image.
+    # 3.6.0.Final is not published yet -- until it is, override with a released
+    # Connect image tag, e.g.:
+    #   DEBEZIUM_VERSION=3.5.0.Final docker compose --profile kafka up -d
+    image: quay.io/debezium/connect:${DEBEZIUM_VERSION:-3.6.0.Final}
     container_name: crdb-debezium-connect
     depends_on:
       - kafka
@@ -108,6 +113,11 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    volumes:
+      # The CockroachDB connector is NOT bundled in the stock Debezium image.
+      # Build it (./mvnw clean package -Passembly in the connector repo) and
+      # point DEBEZIUM_PLUGIN_PATH at the resulting target/plugin directory.
+      - ${DEBEZIUM_PLUGIN_PATH:-./connect-plugins}:/kafka/connect/cockroachdb
     profiles: ["kafka"]
     networks:
       - pipeline
